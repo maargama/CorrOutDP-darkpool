@@ -1,0 +1,247 @@
+# (C) 2017 University of Bristol. See License.txt
+# (C) 2018 KU Leuven. See License.txt
+
+#=======================================================================================#
+import math
+n = 10000  # number of orders
+p = 100  # number of exchange rates
+Max_vec = 2500
+
+liq0 = 100
+liq1 = 200
+rho0 = 0
+rho1 = 0
+
+frozen0 = MemValue(sint(0))
+frozen1 = MemValue(sint(0))
+
+# creating (not so) random bits
+rand = sint.Array(n)
+@for_range(n)
+def loop_body(i):
+    rand[i] = 1
+#rand[5] = 0
+#rand[6] = 0
+#rand[9] = 0
+#rand[8] = 0
+
+vrand = sint(size=n)
+vldms(n, vrand, rand.address)	
+    
+
+#=======================================================================================#
+# READ ORDERS FROM FILE
+ids = sint.Array(n)
+orders_sell = sint.Array(n)
+orders_buy = sint.Array(n)
+
+open_channel_with_return(11)
+none = sint.get_private_input_from(0,11)
+@for_range(n)
+def loop_body(i):
+    ids[i] = sint.get_private_input_from(0,11)
+    orders_sell[i] = sint.get_private_input_from(0,11)
+    orders_buy[i] = sint.get_private_input_from(0,11)
+close_channel(11)
+
+#print_ln()
+#print_ln("Inputs sell / buy")
+#@for_range(n)
+#def loop(i):
+#    print_str("%s   ", orders_sell[i].reveal())
+#    print_str("%s ", orders_buy[i].reveal())
+#    print_ln()
+#print_ln()
+#print_ln()
+
+#=======================================================================================#
+# 10k VECTOR OPS
+def vect_c1(mem1, mem2, mem3, mem4, n):
+
+    for i in range(n/Max_vec):
+        a = sint(size = Max_vec)
+        b = sint(size = Max_vec)
+        c = sint(size = Max_vec)
+
+        vldms(Max_vec, a, mem1 + i*Max_vec) 
+        vldms(Max_vec, b, mem2 + i*Max_vec) 
+        vldms(Max_vec, c, mem3 + i*Max_vec) 
+        d = (a.less_equal(b)) * c
+        d.store_in_mem(mem4 + i*Max_vec)
+    rem = n - (n/Max_vec)*Max_vec
+        
+        
+    if(rem !=0):
+        a = sint(size = rem)
+        b = sint(size = rem)
+        c = sint(size = rem)
+        vldms(rem, a, mem1 + n - rem)
+        vldms(rem, b, mem2 + n - rem)
+        vldms(rem, c, mem3 + n - rem)
+        d = (a.less_equal(b)) * c
+        d.store_in_mem(mem4 + n - rem)
+
+#=======================================================================================#
+# VOLUME MATCHING
+def vm():
+    #print_ln("START VM")
+    vone = sint(1, size=n)
+
+    total_sell = MemValue(sint(0))
+    total_buy = MemValue(sint(0))
+
+    @for_range(n)
+    def loop_body(i):
+        total_sell.write(total_sell + orders_sell[i])
+        total_buy.write(total_buy + orders_buy[i])
+
+    comp = (total_sell > total_buy)
+    small_vol = comp * total_buy + (1-comp) * total_sell 
+
+    #print_ln("Setting small volume")
+    start_timer(1)
+    vsell = sint(size=n)
+    vbuy = sint(size=n)
+    vldms(n, vsell, orders_sell.address)	
+    vldms(n, vbuy, orders_buy.address)	
+    
+    acomp = sint.Array(n)
+    asmall_vol = sint.Array(n)
+    vcomp = sint(size=n)
+    vsmall_vol = sint(size=n)
+    @for_range(n)
+    def loop_body(i):
+        acomp[i] = comp
+        asmall_vol[i] = small_vol
+    vldms(n, vcomp, acomp.address)	
+    vldms(n, vsmall_vol, asmall_vol.address)	
+
+
+
+    # start GET MATCHES
+    #print_ln("GET MATCHES")
+    vbig = vcomp*vsell + (vone - vcomp)*vbuy  
+    abig = sint.Array(n)
+    vbig.store_in_mem(abig.address)
+
+    sigsell = sint.Array(n)
+    sigbuy = sint.Array(n)    
+    sigsell[0] = orders_sell[0]
+    sigbuy[0] = orders_buy[0]
+    @for_range(n-1)
+    def loop_body(i):
+        sigsell[i+1] = sigsell[i] + orders_sell[i+1] 
+        sigbuy[i+1] = sigbuy[i] + orders_buy[i+1] 
+    vsigsell = sint(size=n)
+    vsigbuy = sint(size=n)
+    vldms(n, vsigsell, sigsell.address)	
+    vldms(n, vsigbuy, sigbuy.address)	
+    
+    vsig2 = vcomp*vsigsell + (vone - vcomp)*vsigbuy
+    sig2 = sint.Array(n)
+    vsig2.store_in_mem(sig2.address)
+    match0 = sint.Array(n)
+    vect_c1(sig2.address, asmall_vol.address, abig.address, match0.address, n)
+    vmatch0 = sint(size=n)
+    vldms(n, vmatch0, match0.address)	
+    vmatch = vcomp*vbuy + (vone - vcomp)*vsell + vmatch0
+    # end GET MATCHES
+
+
+
+    # start RR
+    #print_ln("RANDOMIZED RESPONSE")
+    vtrade = vrand*vmatch + (vone - vrand)*(vone - vmatch)
+    vout_sell = vbuy*vtrade + vsell*(vone - vtrade) 
+    vout_buy = vsell*vtrade + vbuy*(vone - vtrade) 
+
+    out_sell = sint.Array(n)
+    out_buy = sint.Array(n)
+    vout_sell.store_in_mem(out_sell.address)
+    vout_buy.store_in_mem(out_buy.address)
+    # end RR
+
+
+
+    # begin UNMATCHED LIQ
+    #print_ln("UNMATCHED LIQUIDITY")
+    total_outsell = MemValue(sint(0))
+    total_outbuy = MemValue(sint(0))
+
+    @for_range(n)
+    def loop_body(i):
+        total_outsell.write(total_outsell + out_sell[i])
+        total_outbuy.write(total_outbuy + out_buy[i])
+    
+    delta0 = total_outsell - total_sell
+    delta1 = total_outbuy - total_buy
+
+    outliq0 = liq0 + delta0 - rho0
+    outliq1 = liq1 + delta1 - rho1
+     
+    frozen0.write(frozen0 + rho0)
+    frozen1.write(frozen1 + rho1)
+
+    stop_timer(1)
+    # end UNMATCHED LIQ
+
+    #print_ln()
+    #print_ln("Ouputs sell / buy")
+    #@for_range(n)
+    #def loop(i):
+    #    print_str("%s   ", out_sell[i].reveal())
+    #    print_str("%s ", out_buy[i].reveal())
+    #    print_ln()
+    #print_ln()
+    #print_ln()
+
+
+    #print_ln("total in buy:  %s,   total in sell:  %s", total_buy.reveal(), total_sell.reveal())
+    #print_ln("total out buy: %s,   total out sell: %s", total_outbuy.reveal(), total_outsell.reveal())
+    #print_ln("delta 0:       %s,   delta 1:        %s", delta0.reveal(), delta1.reveal())
+    
+    #print_ln()
+    #print_ln("liq0:          %s,   liq1:           %s", liq0, liq1)
+    #print_ln("outliq0:       %s,   outliq1:        %s", outliq0.reveal(), outliq1.reveal())
+
+
+
+
+#=======================================================================================#
+# RUN EXPERIMENTS
+"""
+print_ln()
+print_ln("Matrix before")
+@for_range(n)
+def loop(i):
+    @for_range(p)
+    def loop(j):
+        print_str("%s ", orders_matrix[i][j].reveal())
+    print_ln()
+print_ln()
+print_ln()
+"""
+
+#for i in range(1):
+start_timer(2)
+vm()
+stop_timer(2)
+
+
+"""
+print_ln()
+print_ln("Ouputs sell / buy")
+@for_range(n)
+def loop(i):
+    print_str("%s   ", total_outsell[i].reveal())
+    print_str("%s ", total_outbuy[i].reveal())
+    print_ln()
+print_ln()
+print_ln()
+"""
+
+
+
+
+
+
